@@ -1,80 +1,98 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-from fastapi import FastAPI
+import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import os
+from PIL import Image
 
-app = FastAPI()
+st.set_page_config(page_title="FarmAI", layout="centered")
+st.title("🐄 FarmAI: AI for Cow Forecasting, Health & Identity")
 
-# --- Static Data ---
-# Dish-Ingredient Mapping
-dish_ingredient = pd.DataFrame({
-    'Dish': ['Pizza', 'Pizza', 'Pizza', 'Burger', 'Burger', 'Burger', 'Pasta', 'Pasta', 'Pasta'],
-    'Ingredient': ['Flour', 'Cheese', 'Tomato Sauce', 'Bun', 'Beef Patty', 'Cheese', 'Flour', 'Tomato Sauce', 'Cheese'],
-    'QuantityPerDish': [200, 100, 50, 1, 1, 50, 100, 100, 50]
-})
+# ========== PRICE FORECASTING ==========
 
-# Current Inventory
-inventory = pd.DataFrame({
-    'Ingredient': ['Flour', 'Cheese', 'Tomato Sauce', 'Bun', 'Beef Patty'],
-    'QuantityAvailable': [5000, 3000, 2000, 100, 100]
-})
-
-# List of dishes
-dishes = ['Pizza', 'Burger', 'Pasta']
-
-# --- Helper Functions ---
-
-def generate_past_orders():
-    """Simulate past 10 hours of order data"""
+def dummy_forecast(days=30):
     np.random.seed(42)
-    hours_past = range(1, 11)
-    data = []
-    for hour in hours_past:
-        for dish in dishes:
-            orders = np.random.poisson(lam=8)
-            data.append([hour, dish, orders])
-    return pd.DataFrame(data, columns=['Hour', 'Dish', 'Orders'])
+    base = 180000  # Assume base cow price in PKR
+    trend = np.linspace(0, 5000, days)  # Upward trend
+    noise = np.random.normal(0, 2000, days)
+    prices = base + trend + noise
+    return pd.Series(prices)
 
-def forecast_next_orders(orders_df):
-    """Simple moving average forecast for next 5 hours"""
-    forecast_list = []
-    for dish in dishes:
-        dish_orders = orders_df[orders_df['Dish'] == dish]
-        moving_avg = dish_orders['Orders'].rolling(window=3).mean().iloc[-1]
-        for h in range(11, 16):  # next 5 hours
-            forecast_list.append([h, dish, round(moving_avg)])
-    return pd.DataFrame(forecast_list, columns=['Hour', 'Dish', 'ForecastedOrders'])
+# ========== HEALTH CLASSIFIER ==========
 
-def predict_shortages(forecast_df):
-    """Predict shortages based on forecasted orders"""
-    forecast_full = forecast_df.merge(dish_ingredient, on='Dish')
-    forecast_full['TotalIngredientNeeded'] = forecast_full['ForecastedOrders'] * forecast_full['QuantityPerDish']
-    
-    total_ingredient_need = forecast_full.groupby('Ingredient')['TotalIngredientNeeded'].sum().reset_index()
-    
-    inventory_status = inventory.merge(total_ingredient_need, on='Ingredient', how='left').fillna(0)
-    inventory_status['QuantityLeft'] = inventory_status['QuantityAvailable'] - inventory_status['TotalIngredientNeeded']
-    
-    shortages = inventory_status[inventory_status['QuantityLeft'] < 0]
-    shortages = shortages[['Ingredient', 'QuantityLeft']]
-    
-    return shortages
+def classify_health(image):
+    resized = image.resize((128, 128))
+    np_img = np.array(resized) / 255.0
+    brightness = np.mean(np_img)
 
-# --- API Routes ---
+    if brightness > 0.6:
+        return "🟢 Healthy"
+    elif brightness > 0.4:
+        return "🟡 Under Observation"
+    else:
+        return "🔴 Sick"
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the Restaurant Inventory Predictor API!"}
+# ========== NOSEPRINT MATCHING ==========
 
-@app.get("/forecast")
-def get_forecast():
-    orders_df = generate_past_orders()
-    forecast_df = forecast_next_orders(orders_df)
-    shortages = predict_shortages(forecast_df)
-    return shortages.to_dict(orient="records")
+def match_noseprint(uploaded_image, registry_dir="nose_registry"):
+    orb = cv2.ORB_create()
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
+    uploaded_gray = np.array(uploaded_image.convert("L"))
+    kp1, des1 = orb.detectAndCompute(uploaded_gray, None)
+
+    best_match = None
+    max_matches = 0
+
+    for file in os.listdir(registry_dir):
+        if file.lower().endswith((".jpg", ".jpeg", ".png")):
+            reg_img = Image.open(os.path.join(registry_dir, file)).convert("L")
+            reg_np = np.array(reg_img)
+            kp2, des2 = orb.detectAndCompute(reg_np, None)
+            if des1 is not None and des2 is not None:
+                matches = bf.match(des1, des2)
+                if len(matches) > max_matches:
+                    max_matches = len(matches)
+                    best_match = file
+
+    return best_match if max_matches > 10 else None
+
+# ========== UI ==========
+
+tab1, tab2, tab3 = st.tabs(["📈 Price Forecast", "🩺 Health Check", "🆔 Noseprint Identity"])
+
+# --------- PRICE ---------
+with tab1:
+    st.header("📈 Cow Price Forecast (Demo)")
+    days = st.slider("Select days", 7, 60, 30)
+    forecast = dummy_forecast(days)
+    st.line_chart(forecast)
+
+# --------- HEALTH ---------
+with tab2:
+    st.header("🩺 Cow Health Classifier (Demo)")
+    image_file = st.file_uploader("Upload a cow image", type=["jpg", "png", "jpeg"], key="health")
+    if image_file:
+        image = Image.open(image_file)
+        st.image(image, caption="Cow Image", use_column_width=True)
+        health_status = classify_health(image)
+        st.success(f"Health Status: {health_status}")
+
+# --------- NOSE ID ---------
+with tab3:
+    st.header("🆔 Cow Noseprint Identity Match")
+    st.write("Uploads compared to local registry in `/nose_registry` folder.")
+    image_file = st.file_uploader("Upload nose image", type=["jpg", "png", "jpeg"], key="nose")
+    if image_file:
+        image = Image.open(image_file)
+        st.image(image, caption="Nose Image", use_column_width=True)
+
+        # Ensure directory exists
+        os.makedirs("nose_registry", exist_ok=True)
+
+        match = match_noseprint(image)
+        if match:
+            st.success(f"✅ Match found with: {match}")
+        else:
+            st.error("❌ No matching cow found.")
